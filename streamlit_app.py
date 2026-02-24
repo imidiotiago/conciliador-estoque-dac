@@ -5,15 +5,12 @@ import io
 from requests.auth import HTTPBasicAuth
 
 # --- 1. FUNÇÃO DE AUTENTICAÇÃO (WMS) ---
-def gera_token():
-    # Mantivemos as chaves fixas aqui conforme solicitado
+def gera_token(client_id, client_secret):
     AUTH_URL = "https://supply.rac.totvs.app/totvs.rac/connect/token" 
-    CLIENT_ID = "2006151c237e4124ad27927d92a17861"
-    CLIENT_SECRET = "0e3b002202e74259b52cf9a39c677052"
-
+    
     token_data = {
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
+        "client_id": client_id,
+        "client_secret": client_secret,
         "grant_type": "client_credentials",
         "scope": "authorization_api"
     }
@@ -21,8 +18,11 @@ def gera_token():
         response = requests.post(AUTH_URL, data=token_data, timeout=10)
         if response.status_code == 200:
             return response.json().get("access_token")
-        return None
-    except:
+        else:
+            st.error(f"Erro WMS: Verifique o ClientID e Secret (Status {response.status_code})")
+            return None
+    except Exception as e:
+        st.error(f"Falha na comunicação com WMS: {e}")
         return None
 
 # --- 2. BUSCA DADOS PROTHEUS ---
@@ -34,7 +34,6 @@ def buscar_dados_protheus(url_api, user, pwd):
     while tem_proxima_prw:
         try:
             url = f"{url_api}?nPage={pagina_prw}&nPageSize=1000"
-            # Utiliza as credenciais passadas pelo usuário na interface
             response = requests.get(url, auth=HTTPBasicAuth(user, pwd), timeout=25)
             if response.status_code == 200:
                 dados = response.json()
@@ -52,7 +51,9 @@ def buscar_dados_protheus(url_api, user, pwd):
                         })
                 tem_proxima_prw = dados.get('hasNext', False)
                 pagina_prw += 1
-            else: break
+            else: 
+                st.error(f"Erro Protheus: Verifique URL/Usuário/Senha (Status {response.status_code})")
+                break
         except: break
     return pd.DataFrame(todos_items)
 
@@ -111,41 +112,57 @@ st.set_page_config(page_title="Conciliador DaColonia", layout="wide")
 st.title("📊 Conciliador de Estoque: Protheus x WMS")
 
 with st.sidebar:
-    st.header("🔑 Login Protheus")
-    # URL mantida como padrão para facilitar, mas editável
+    st.header("🔑 Credenciais Protheus")
     url_p = st.text_input("URL REST", value="https://dacolonia196730.protheus.cloudtotvs.com.br:10408/rest/zsaldoslote/")
-    # Usuário e Senha agora vêm vazios para entrada manual
-    user_p = st.text_input("Usuário")
-    pass_p = st.text_input("Senha", type="password")
+    user_p = st.text_input("Usuário Protheus")
+    pass_p = st.text_input("Senha Protheus", type="password")
     
     st.divider()
-    st.caption("As credenciais do WMS SaaS estão configuradas internamente.")
+    
+    st.header("☁️ Credenciais WMS SaaS")
+    wms_id = st.text_input("Client ID WMS")
+    wms_secret = st.text_input("Client Secret WMS", type="password")
+    
+    st.divider()
+    st.caption("Nenhuma credencial é armazenada neste servidor.")
 
 if st.button("🚀 Iniciar Conciliação"):
-    if not user_p or not pass_p:
-        st.error("⚠️ Informe o Usuário e a Senha na barra lateral para continuar.")
+    # Validação: Verifica se todos os campos foram preenchidos
+    if not all([url_p, user_p, pass_p, wms_id, wms_secret]):
+        st.error("⚠️ Por favor, preencha todas as credenciais do Protheus e do WMS na barra lateral.")
     else:
-        token = gera_token()
+        # Tenta gerar o token com as chaves inseridas pelo usuário
+        token = gera_token(wms_id, wms_secret)
+        
         if token:
-            with st.spinner("Processando dados..."):
+            with st.spinner("Comparando estoques..."):
                 df_p_raw = buscar_dados_protheus(url_p, user_p, pass_p)
                 df_w_raw = buscar_dados_wms(token)
 
                 if not df_p_raw.empty and not df_w_raw.empty:
-                    df_p = df_p_raw.groupby(['produto', 'lote', 'validade', 'armazem'], as_index=False)['quantidade'].sum().rename(columns={'quantidade': 'SALDO_PROTHEUS'})
-                    df_w = df_w_raw.groupby(['produto', 'lote', 'validade', 'armazem'], as_index=False)['quantidade'].sum().rename(columns={'quantidade': 'SALDO_WMS'})
+                    # Consolidação Protheus
+                    df_p = df_p_raw.groupby(['produto', 'lote', 'validade', 'armazem'], as_index=False)['quantidade'].sum()
+                    df_p.rename(columns={'quantidade': 'SALDO_PROTHEUS'}, inplace=True)
+
+                    # Consolidação WMS
+                    df_w = df_w_raw.groupby(['produto', 'lote', 'validade', 'armazem'], as_index=False)['quantidade'].sum()
+                    df_w.rename(columns={'quantidade': 'SALDO_WMS'}, inplace=True)
                     
+                    # Cruzamento
                     df_res = pd.merge(df_p, df_w, on=['produto', 'lote', 'validade', 'armazem'], how='outer').fillna(0)
                     df_res['DIFERENCA'] = df_res['SALDO_PROTHEUS'] - df_res['SALDO_WMS']
                     
                     st.success("Conciliação finalizada!")
-                    st.dataframe(df_res[df_res['DIFERENCA'] != 0], use_container_width=True)
                     
+                    # Exibição de Divergências
+                    df_erros = df_res[df_res['DIFERENCA'] != 0].copy()
+                    st.write(f"### Itens com Divergência ({len(df_erros)})")
+                    st.dataframe(df_erros, use_container_width=True)
+                    
+                    # Preparação do Excel
                     buffer = io.BytesIO()
                     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                        df_res.to_excel(writer, index=False)
-                    st.download_button("📥 Baixar Relatório Excel", buffer.getvalue(), "conciliacao.xlsx")
+                        df_res.to_excel(writer, index=False, sheet_name='Conciliado')
+                    st.download_button("📥 Baixar Relatório Excel", buffer.getvalue(), "conciliacao_estoque.xlsx")
                 else:
-                    st.error("Verifique as credenciais ou filtros. Uma das bases retornou vazia.")
-        else:
-            st.error("Falha na autenticação do WMS.")
+                    st.warning("Verifique se as credenciais estão corretas. Uma das bases não retornou dados.")
