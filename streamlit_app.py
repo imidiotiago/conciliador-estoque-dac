@@ -43,8 +43,8 @@ def buscar_dados_protheus(url_base, user, pwd):
                         cod_arm = val_arm.zfill(2)
                         todos_items.append({
                             "produto": str(i.get('produto', '')).strip(),
-                            "lote": str(i.get('lote', '')).strip(),
-                            "validade": str(i.get('validade', '')),
+                            "lote_protheus": str(i.get('lote', '')).strip(),
+                            "validade_protheus": str(i.get('validade', '')),
                             "quantidade": float(i.get('quantidade', 0)),
                             "armazem": cod_arm
                         })
@@ -90,7 +90,8 @@ def buscar_dados_wms(token):
                             elif "VALIDADE" in desc: validade = str(c.get('valor', '1900-01-01')).strip()
                         todos_items_formatados.append({
                             "produto": str(item.get('produto', {}).get('codigo', '')).strip(),
-                            "lote": lote, "validade": validade,
+                            "lote_wms": lote, 
+                            "validade_wms": validade,
                             "quantidade": float(item.get('saldo', 0)),
                             "armazem": cod_arm
                         })
@@ -106,20 +107,15 @@ st.title("📊 Conciliador de Estoque: Protheus x WMS")
 
 with st.sidebar:
     st.header("🔑 Acesso Protheus")
-    # O parâmetro 'key' ajuda o Streamlit a manter o estado durante a sessão
     url_base = st.text_input("Endereço do Servidor", value="https://dacolonia196730.protheus.cloudtotvs.com.br:10408/rest", key="saved_url")
     user_p = st.text_input("Usuário Protheus", key="saved_user")
     pass_p = st.text_input("Senha Protheus", type="password", key="saved_pass")
-    
     st.divider()
-    
     st.header("☁️ Acesso WMS SaaS")
     wms_id = st.text_input("Client ID", type="password", key="saved_wms_id")
     wms_secret = st.text_input("Client Secret", type="password", key="saved_wms_secret")
-    
     st.divider()
-    # Checkbox para o usuário decidir se quer manter os dados na sessão
-    st.caption("🔒 Os dados são mantidos apenas enquanto a aba estiver aberta.")
+    st.caption("🔒 Os dados são mantidos apenas durante a sessão.")
 
 if st.button("🚀 Iniciar Conciliação"):
     if not all([url_base, user_p, pass_p, wms_id, wms_secret]):
@@ -132,21 +128,42 @@ if st.button("🚀 Iniciar Conciliação"):
                 df_w_raw = buscar_dados_wms(token)
 
                 if not df_p_raw.empty and not df_w_raw.empty:
-                    df_p = df_p_raw.groupby(['produto', 'lote', 'validade', 'armazem'], as_index=False)['quantidade'].sum().rename(columns={'quantidade': 'SALDO_PROTHEUS'})
-                    df_w = df_w_raw.groupby(['produto', 'lote', 'validade', 'armazem'], as_index=False)['quantidade'].sum().rename(columns={'quantidade': 'SALDO_WMS'})
-                    df_res = pd.merge(df_p, df_w, on=['produto', 'lote', 'validade', 'armazem'], how='outer').fillna(0)
+                    # Agrupamento Protheus (Lote e Validade agora são colunas específicas)
+                    df_p = df_p_raw.groupby(['produto', 'armazem', 'lote_protheus', 'validade_protheus'], as_index=False)['quantidade'].sum()
+                    df_p.rename(columns={'quantidade': 'SALDO_PROTHEUS'}, inplace=True)
+
+                    # Agrupamento WMS
+                    df_w = df_w_raw.groupby(['produto', 'armazem', 'lote_wms', 'validade_wms'], as_index=False)['quantidade'].sum()
+                    df_w.rename(columns={'quantidade': 'SALDO_WMS'}, inplace=True)
+                    
+                    # Cruzamento por Produto e Armazém (Merge flexível para mostrar as diferenças de lote/validade)
+                    # Note que se o lote for o mesmo, o merge tentará alinhar, mas aqui usamos 
+                    # as chaves comuns para uma visão analítica
+                    df_res = pd.merge(
+                        df_p, 
+                        df_w, 
+                        left_on=['produto', 'armazem', 'lote_protheus', 'validade_protheus'],
+                        right_on=['produto', 'armazem', 'lote_wms', 'validade_wms'],
+                        how='outer'
+                    ).fillna({'SALDO_PROTHEUS': 0, 'SALDO_WMS': 0, 'lote_protheus': '-', 'lote_wms': '-', 'validade_protheus': '-', 'validade_wms': '-'})
+                    
                     df_res['DIFERENCA'] = df_res['SALDO_PROTHEUS'] - df_res['SALDO_WMS']
+                    
+                    # Reordenando colunas para melhor leitura
+                    cols = ['produto', 'armazem', 'lote_protheus', 'lote_wms', 'validade_protheus', 'validade_wms', 'SALDO_PROTHEUS', 'SALDO_WMS', 'DIFERENCA']
+                    df_res = df_res[cols]
                     
                     st.success("Conciliação concluída!")
                     df_erros = df_res[df_res['DIFERENCA'] != 0].copy()
-                    st.write(f"### Itens com Divergência ({len(df_erros)})")
+                    
+                    st.write(f"### 📋 Divergências Detalhadas ({len(df_erros)})")
                     st.dataframe(df_erros, use_container_width=True)
                     
                     buffer = io.BytesIO()
                     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                        df_res.to_excel(writer, index=False)
+                        df_res.to_excel(writer, index=False, sheet_name='Geral')
                     st.download_button("📥 Baixar Relatório", buffer.getvalue(), "conciliacao_dacolonia.xlsx")
                 else:
-                    st.error("❌ Verifique as credenciais.")
+                    st.error("❌ Verifique as credenciais ou filtros de armazém.")
         else:
             st.error("❌ Falha na autenticação WMS.")
