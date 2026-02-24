@@ -7,7 +7,6 @@ from requests.auth import HTTPBasicAuth
 # --- 1. FUNÇÃO DE AUTENTICAÇÃO (WMS) ---
 def gera_token(client_id, client_secret):
     AUTH_URL = "https://supply.rac.totvs.app/totvs.rac/connect/token" 
-    
     token_data = {
         "client_id": client_id,
         "client_secret": client_secret,
@@ -18,23 +17,26 @@ def gera_token(client_id, client_secret):
         response = requests.post(AUTH_URL, data=token_data, timeout=10)
         if response.status_code == 200:
             return response.json().get("access_token")
-        else:
-            st.error(f"Erro WMS: Verifique o ClientID e Secret (Status {response.status_code})")
-            return None
-    except Exception as e:
-        st.error(f"Falha na comunicação com WMS: {e}")
+        return None
+    except:
         return None
 
 # --- 2. BUSCA DADOS PROTHEUS ---
-def buscar_dados_protheus(url_api, user, pwd):
+def buscar_dados_protheus(url_base, user, pwd):
     todos_items = []
     pagina_prw = 1
     tem_proxima_prw = True
     
+    # Montagem interna da URL: remove barras extras e adiciona o endpoint fixo
+    url_limpa = url_base.strip().rstrip('/')
+    endpoint_fixo = "/zsaldoslote/"
+    url_completa = f"{url_limpa}{endpoint_fixo}"
+    
     while tem_proxima_prw:
         try:
-            url = f"{url_api}?nPage={pagina_prw}&nPageSize=1000"
-            response = requests.get(url, auth=HTTPBasicAuth(user, pwd), timeout=25)
+            url_paginada = f"{url_completa}?nPage={pagina_prw}&nPageSize=1000"
+            response = requests.get(url_paginada, auth=HTTPBasicAuth(user, pwd), timeout=25)
+            
             if response.status_code == 200:
                 dados = response.json()
                 items = dados.get('items', [])
@@ -51,9 +53,7 @@ def buscar_dados_protheus(url_api, user, pwd):
                         })
                 tem_proxima_prw = dados.get('hasNext', False)
                 pagina_prw += 1
-            else: 
-                st.error(f"Erro Protheus: Verifique URL/Usuário/Senha (Status {response.status_code})")
-                break
+            else: break
         except: break
     return pd.DataFrame(todos_items)
 
@@ -64,7 +64,6 @@ def buscar_dados_wms(token):
     tem_proxima_wms = True
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     
-    # IDs de Tipo de Estoque fixos do ambiente DaColonia
     ID_PA = "019b93db-5f78-7d1d-84bb-77fc2c45b068" # 01
     ID_MP = "019b5bb5-cf01-781f-92be-49c08ab2d635" # 05
 
@@ -86,20 +85,18 @@ def buscar_dados_wms(token):
                 dados = response.json()
                 for item in dados.get('items', []):
                     id_tipo = item.get('tipoEstoque', {}).get('id', '')
-                    cod_armazem = "01" if id_tipo == ID_PA else "05" if id_tipo == ID_MP else ""
-
-                    if cod_armazem:
+                    cod_arm = "01" if id_tipo == ID_PA else "05" if id_tipo == ID_MP else ""
+                    if cod_arm:
                         lote, validade = "0", "1900-01-01"
-                        for carac in item.get('caracteristicas', []):
-                            desc = carac.get('descricao', '').upper()
-                            if "LOTE" in desc: lote = str(carac.get('valor', '0')).strip()
-                            elif "VALIDADE" in desc: validade = str(carac.get('valor', '1900-01-01')).strip()
-
+                        for c in item.get('caracteristicas', []):
+                            desc = c.get('descricao', '').upper()
+                            if "LOTE" in desc: lote = str(c.get('valor', '0')).strip()
+                            elif "VALIDADE" in desc: validade = str(c.get('valor', '1900-01-01')).strip()
                         todos_items_formatados.append({
                             "produto": str(item.get('produto', {}).get('codigo', '')).strip(),
                             "lote": lote, "validade": validade,
                             "quantidade": float(item.get('saldo', 0)),
-                            "armazem": cod_armazem
+                            "armazem": cod_arm
                         })
                 tem_proxima_wms = dados.get('hasNext', False)
                 pagina_wms += 1
@@ -107,62 +104,53 @@ def buscar_dados_wms(token):
         except: break
     return pd.DataFrame(todos_items_formatados)
 
-# --- 4. INTERFACE ---
+# --- 4. INTERFACE PRINCIPAL ---
 st.set_page_config(page_title="Conciliador DaColonia", layout="wide")
 st.title("📊 Conciliador de Estoque: Protheus x WMS")
 
 with st.sidebar:
-    st.header("🔑 Credenciais Protheus")
-    url_p = st.text_input("URL REST", value="https://dacolonia196730.protheus.cloudtotvs.com.br:10408/rest/zsaldoslote/")
+    st.header("🔑 Acesso Protheus")
+    # Agora pedimos apenas o endereço base do servidor
+    url_base = st.text_input("Endereço do Servidor", value="https://dacolonia196730.protheus.cloudtotvs.com.br:10408/rest")
     user_p = st.text_input("Usuário Protheus")
     pass_p = st.text_input("Senha Protheus", type="password")
     
     st.divider()
     
-    st.header("☁️ Credenciais WMS SaaS")
-    wms_id = st.text_input("Client ID WMS")
-    wms_secret = st.text_input("Client Secret WMS", type="password")
+    st.header("☁️ Acesso WMS SaaS")
+    wms_id = st.text_input("Client ID")
+    wms_secret = st.text_input("Client Secret", type="password")
     
     st.divider()
-    st.caption("Nenhuma credencial é armazenada neste servidor.")
+    st.caption("🔒 Nenhuma senha é armazenada no código ou servidor.")
 
 if st.button("🚀 Iniciar Conciliação"):
-    # Validação: Verifica se todos os campos foram preenchidos
-    if not all([url_p, user_p, pass_p, wms_id, wms_secret]):
-        st.error("⚠️ Por favor, preencha todas as credenciais do Protheus e do WMS na barra lateral.")
+    if not all([url_base, user_p, pass_p, wms_id, wms_secret]):
+        st.warning("⚠️ Preencha todos os campos na barra lateral para continuar.")
     else:
-        # Tenta gerar o token com as chaves inseridas pelo usuário
         token = gera_token(wms_id, wms_secret)
-        
         if token:
-            with st.spinner("Comparando estoques..."):
-                df_p_raw = buscar_dados_protheus(url_p, user_p, pass_p)
+            with st.spinner("Comparando saldos..."):
+                df_p_raw = buscar_dados_protheus(url_base, user_p, pass_p)
                 df_w_raw = buscar_dados_wms(token)
 
                 if not df_p_raw.empty and not df_w_raw.empty:
-                    # Consolidação Protheus
-                    df_p = df_p_raw.groupby(['produto', 'lote', 'validade', 'armazem'], as_index=False)['quantidade'].sum()
-                    df_p.rename(columns={'quantidade': 'SALDO_PROTHEUS'}, inplace=True)
-
-                    # Consolidação WMS
-                    df_w = df_w_raw.groupby(['produto', 'lote', 'validade', 'armazem'], as_index=False)['quantidade'].sum()
-                    df_w.rename(columns={'quantidade': 'SALDO_WMS'}, inplace=True)
+                    df_p = df_p_raw.groupby(['produto', 'lote', 'validade', 'armazem'], as_index=False)['quantidade'].sum().rename(columns={'quantidade': 'SALDO_PROTHEUS'})
+                    df_w = df_w_raw.groupby(['produto', 'lote', 'validade', 'armazem'], as_index=False)['quantidade'].sum().rename(columns={'quantidade': 'SALDO_WMS'})
                     
-                    # Cruzamento
                     df_res = pd.merge(df_p, df_w, on=['produto', 'lote', 'validade', 'armazem'], how='outer').fillna(0)
                     df_res['DIFERENCA'] = df_res['SALDO_PROTHEUS'] - df_res['SALDO_WMS']
                     
-                    st.success("Conciliação finalizada!")
-                    
-                    # Exibição de Divergências
+                    st.success("Conciliação concluída!")
                     df_erros = df_res[df_res['DIFERENCA'] != 0].copy()
                     st.write(f"### Itens com Divergência ({len(df_erros)})")
                     st.dataframe(df_erros, use_container_width=True)
                     
-                    # Preparação do Excel
                     buffer = io.BytesIO()
                     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                        df_res.to_excel(writer, index=False, sheet_name='Conciliado')
-                    st.download_button("📥 Baixar Relatório Excel", buffer.getvalue(), "conciliacao_estoque.xlsx")
+                        df_res.to_excel(writer, index=False)
+                    st.download_button("📥 Baixar Relatório Completo", buffer.getvalue(), "conciliacao_dacolonia.xlsx")
                 else:
-                    st.warning("Verifique se as credenciais estão corretas. Uma das bases não retornou dados.")
+                    st.error("❌ Verifique as credenciais. Uma das bases retornou vazia.")
+        else:
+            st.error("❌ Falha na autenticação WMS. Verifique Client ID e Secret.")
