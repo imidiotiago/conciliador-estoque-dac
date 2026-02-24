@@ -26,8 +26,6 @@ def buscar_dados_protheus(url_base, user, pwd):
     todos_items = []
     pagina_prw = 1
     tem_proxima_prw = True
-    
-    # Montagem interna da URL: remove barras extras e adiciona o endpoint fixo
     url_limpa = url_base.strip().rstrip('/')
     endpoint_fixo = "/zsaldoslote/"
     url_completa = f"{url_limpa}{endpoint_fixo}"
@@ -36,7 +34,6 @@ def buscar_dados_protheus(url_base, user, pwd):
         try:
             url_paginada = f"{url_completa}?nPage={pagina_prw}&nPageSize=1000"
             response = requests.get(url_paginada, auth=HTTPBasicAuth(user, pwd), timeout=25)
-            
             if response.status_code == 200:
                 dados = response.json()
                 items = dados.get('items', [])
@@ -63,9 +60,8 @@ def buscar_dados_wms(token):
     pagina_wms = 1
     tem_proxima_wms = True
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    
-    ID_PA = "019b93db-5f78-7d1d-84bb-77fc2c45b068" # 01
-    ID_MP = "019b5bb5-cf01-781f-92be-49c08ab2d635" # 05
+    ID_PA = "019b93db-5f78-7d1d-84bb-77fc2c45b068"
+    ID_MP = "019b5bb5-cf01-781f-92be-49c08ab2d635"
 
     while tem_proxima_wms:
         url_pag = f"https://supply.logistica.totvs.app/wms/query/api/v3/estoques/analitico?page={pagina_wms}&pageSize=1000"
@@ -110,23 +106,24 @@ st.title("📊 Conciliador de Estoque: Protheus x WMS")
 
 with st.sidebar:
     st.header("🔑 Acesso Protheus")
-    # Agora pedimos apenas o endereço base do servidor
-    url_base = st.text_input("Endereço do Servidor", value="https://dacolonia196730.protheus.cloudtotvs.com.br:10408/rest")
-    user_p = st.text_input("Usuário Protheus")
-    pass_p = st.text_input("Senha Protheus", type="password")
+    # O parâmetro 'key' ajuda o Streamlit a manter o estado durante a sessão
+    url_base = st.text_input("Endereço do Servidor", value="https://dacolonia196730.protheus.cloudtotvs.com.br:10408/rest", key="saved_url")
+    user_p = st.text_input("Usuário Protheus", key="saved_user")
+    pass_p = st.text_input("Senha Protheus", type="password", key="saved_pass")
     
     st.divider()
     
     st.header("☁️ Acesso WMS SaaS")
-    wms_id = st.text_input("Client ID")
-    wms_secret = st.text_input("Client Secret", type="password")
+    wms_id = st.text_input("Client ID", type="password", key="saved_wms_id")
+    wms_secret = st.text_input("Client Secret", type="password", key="saved_wms_secret")
     
     st.divider()
-    st.caption("🔒 Nenhuma senha é armazenada no código ou servidor.")
+    # Checkbox para o usuário decidir se quer manter os dados na sessão
+    st.caption("🔒 Os dados são mantidos apenas enquanto a aba estiver aberta.")
 
 if st.button("🚀 Iniciar Conciliação"):
     if not all([url_base, user_p, pass_p, wms_id, wms_secret]):
-        st.warning("⚠️ Preencha todos os campos na barra lateral para continuar.")
+        st.warning("⚠️ Preencha todos os campos na barra lateral.")
     else:
         token = gera_token(wms_id, wms_secret)
         if token:
@@ -137,7 +134,6 @@ if st.button("🚀 Iniciar Conciliação"):
                 if not df_p_raw.empty and not df_w_raw.empty:
                     df_p = df_p_raw.groupby(['produto', 'lote', 'validade', 'armazem'], as_index=False)['quantidade'].sum().rename(columns={'quantidade': 'SALDO_PROTHEUS'})
                     df_w = df_w_raw.groupby(['produto', 'lote', 'validade', 'armazem'], as_index=False)['quantidade'].sum().rename(columns={'quantidade': 'SALDO_WMS'})
-                    
                     df_res = pd.merge(df_p, df_w, on=['produto', 'lote', 'validade', 'armazem'], how='outer').fillna(0)
                     df_res['DIFERENCA'] = df_res['SALDO_PROTHEUS'] - df_res['SALDO_WMS']
                     
@@ -149,8 +145,8 @@ if st.button("🚀 Iniciar Conciliação"):
                     buffer = io.BytesIO()
                     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
                         df_res.to_excel(writer, index=False)
-                    st.download_button("📥 Baixar Relatório Completo", buffer.getvalue(), "conciliacao_dacolonia.xlsx")
+                    st.download_button("📥 Baixar Relatório", buffer.getvalue(), "conciliacao_dacolonia.xlsx")
                 else:
-                    st.error("❌ Verifique as credenciais. Uma das bases retornou vazia.")
+                    st.error("❌ Verifique as credenciais.")
         else:
-            st.error("❌ Falha na autenticação WMS. Verifique Client ID e Secret.")
+            st.error("❌ Falha na autenticação WMS.")
