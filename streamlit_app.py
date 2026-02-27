@@ -4,6 +4,10 @@ import streamlit as st
 import io
 from requests.auth import HTTPBasicAuth
 
+# --- CONFIGURAÇÃO INTERNA ---
+# O endereço foi movido para cá para não aparecer na tela
+URL_REST_PROTHEUS = "https://dacolonia196730.protheus.cloudtotvs.com.br:10408/rest"
+
 # --- 1. FUNÇÃO DE AUTENTICAÇÃO (WMS) ---
 def gera_token(client_id, client_secret):
     AUTH_URL = "https://supply.rac.totvs.app/totvs.rac/connect/token" 
@@ -107,7 +111,7 @@ st.title("📊 Conciliador de Estoque: Protheus x WMS")
 
 with st.sidebar:
     st.header("🔑 Acesso Protheus")
-    url_base = st.text_input("Endereço do Servidor", value="https://dacolonia196730.protheus.cloudtotvs.com.br:10408/rest", key="saved_url")
+    # Removido o st.text_input do endereço do servidor
     user_p = st.text_input("Usuário Protheus", key="saved_user")
     pass_p = st.text_input("Senha Protheus", type="password", key="saved_pass")
     st.divider()
@@ -118,52 +122,27 @@ with st.sidebar:
     st.caption("🔒 Os dados são mantidos apenas durante a sessão.")
 
 if st.button("🚀 Iniciar Conciliação"):
-    if not all([url_base, user_p, pass_p, wms_id, wms_secret]):
+    # Verifica se os outros campos estão preenchidos (URL_REST_PROTHEUS é fixa agora)
+    if not all([user_p, pass_p, wms_id, wms_secret]):
         st.warning("⚠️ Preencha todos os campos na barra lateral.")
     else:
         token = gera_token(wms_id, wms_secret)
         if token:
             with st.spinner("Comparando saldos..."):
-                df_p_raw = buscar_dados_protheus(url_base, user_p, pass_p)
+                # Utiliza a variável oculta URL_REST_PROTHEUS
+                df_p_raw = buscar_dados_protheus(URL_REST_PROTHEUS, user_p, pass_p)
                 df_w_raw = buscar_dados_wms(token)
 
                 if not df_p_raw.empty and not df_w_raw.empty:
-                    # Agrupamento Protheus (Lote e Validade agora são colunas específicas)
                     df_p = df_p_raw.groupby(['produto', 'armazem', 'lote_protheus', 'validade_protheus'], as_index=False)['quantidade'].sum()
                     df_p.rename(columns={'quantidade': 'SALDO_PROTHEUS'}, inplace=True)
 
-                    # Agrupamento WMS
                     df_w = df_w_raw.groupby(['produto', 'armazem', 'lote_wms', 'validade_wms'], as_index=False)['quantidade'].sum()
                     df_w.rename(columns={'quantidade': 'SALDO_WMS'}, inplace=True)
                     
-                    # Cruzamento por Produto e Armazém (Merge flexível para mostrar as diferenças de lote/validade)
-                    # Note que se o lote for o mesmo, o merge tentará alinhar, mas aqui usamos 
-                    # as chaves comuns para uma visão analítica
                     df_res = pd.merge(
                         df_p, 
                         df_w, 
                         left_on=['produto', 'armazem', 'lote_protheus', 'validade_protheus'],
                         right_on=['produto', 'armazem', 'lote_wms', 'validade_wms'],
                         how='outer'
-                    ).fillna({'SALDO_PROTHEUS': 0, 'SALDO_WMS': 0, 'lote_protheus': '-', 'lote_wms': '-', 'validade_protheus': '-', 'validade_wms': '-'})
-                    
-                    df_res['DIFERENCA'] = df_res['SALDO_PROTHEUS'] - df_res['SALDO_WMS']
-                    
-                    # Reordenando colunas para melhor leitura
-                    cols = ['produto', 'armazem', 'lote_protheus', 'lote_wms', 'validade_protheus', 'validade_wms', 'SALDO_PROTHEUS', 'SALDO_WMS', 'DIFERENCA']
-                    df_res = df_res[cols]
-                    
-                    st.success("Conciliação concluída!")
-                    df_erros = df_res[df_res['DIFERENCA'] != 0].copy()
-                    
-                    st.write(f"### 📋 Divergências Detalhadas ({len(df_erros)})")
-                    st.dataframe(df_erros, use_container_width=True)
-                    
-                    buffer = io.BytesIO()
-                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                        df_res.to_excel(writer, index=False, sheet_name='Geral')
-                    st.download_button("📥 Baixar Relatório", buffer.getvalue(), "conciliacao_dacolonia.xlsx")
-                else:
-                    st.error("❌ Verifique as credenciais ou filtros de armazém.")
-        else:
-            st.error("❌ Falha na autenticação WMS.")
