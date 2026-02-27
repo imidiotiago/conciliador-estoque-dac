@@ -4,8 +4,7 @@ import streamlit as st
 import io
 from requests.auth import HTTPBasicAuth
 
-# --- CONFIGURAÇÃO INTERNA ---
-# O endereço foi movido para cá para não aparecer na tela
+# --- CONFIGURAÇÃO INTERNA (OCULTA DA TELA) ---
 URL_REST_PROTHEUS = "https://dacolonia196730.protheus.cloudtotvs.com.br:10408/rest"
 
 # --- 1. FUNÇÃO DE AUTENTICAÇÃO (WMS) ---
@@ -111,7 +110,6 @@ st.title("📊 Conciliador de Estoque: Protheus x WMS")
 
 with st.sidebar:
     st.header("🔑 Acesso Protheus")
-    # Removido o st.text_input do endereço do servidor
     user_p = st.text_input("Usuário Protheus", key="saved_user")
     pass_p = st.text_input("Senha Protheus", type="password", key="saved_pass")
     st.divider()
@@ -122,27 +120,72 @@ with st.sidebar:
     st.caption("🔒 Os dados são mantidos apenas durante a sessão.")
 
 if st.button("🚀 Iniciar Conciliação"):
-    # Verifica se os outros campos estão preenchidos (URL_REST_PROTHEUS é fixa agora)
+    # Validação dos campos obrigatórios
     if not all([user_p, pass_p, wms_id, wms_secret]):
         st.warning("⚠️ Preencha todos os campos na barra lateral.")
     else:
         token = gera_token(wms_id, wms_secret)
         if token:
             with st.spinner("Comparando saldos..."):
-                # Utiliza a variável oculta URL_REST_PROTHEUS
+                # Busca os dados usando a URL interna
                 df_p_raw = buscar_dados_protheus(URL_REST_PROTHEUS, user_p, pass_p)
                 df_w_raw = buscar_dados_wms(token)
 
                 if not df_p_raw.empty and not df_w_raw.empty:
+                    # Agrupamento Protheus
                     df_p = df_p_raw.groupby(['produto', 'armazem', 'lote_protheus', 'validade_protheus'], as_index=False)['quantidade'].sum()
                     df_p.rename(columns={'quantidade': 'SALDO_PROTHEUS'}, inplace=True)
 
+                    # Agrupamento WMS
                     df_w = df_w_raw.groupby(['produto', 'armazem', 'lote_wms', 'validade_wms'], as_index=False)['quantidade'].sum()
                     df_w.rename(columns={'quantidade': 'SALDO_WMS'}, inplace=True)
                     
+                    # Merge dos dados (Conciliação)
                     df_res = pd.merge(
                         df_p, 
                         df_w, 
                         left_on=['produto', 'armazem', 'lote_protheus', 'validade_protheus'],
                         right_on=['produto', 'armazem', 'lote_wms', 'validade_wms'],
                         how='outer'
+                    )
+
+                    # Preenchimento de valores nulos (Itens que existem em um lado mas não no outro)
+                    df_res = df_res.fillna({
+                        'SALDO_PROTHEUS': 0, 
+                        'SALDO_WMS': 0, 
+                        'lote_protheus': '-', 
+                        'lote_wms': '-', 
+                        'validade_protheus': '-', 
+                        'validade_wms': '-'
+                    })
+                    
+                    # Cálculo da diferença
+                    df_res['DIFERENCA'] = df_res['SALDO_PROTHEUS'] - df_res['SALDO_WMS']
+                    
+                    # Ordenação de colunas
+                    cols = ['produto', 'armazem', 'lote_protheus', 'lote_wms', 'validade_protheus', 'validade_wms', 'SALDO_PROTHEUS', 'SALDO_WMS', 'DIFERENCA']
+                    df_res = df_res[cols]
+                    
+                    st.success("Conciliação concluída!")
+                    
+                    # Filtrar apenas as divergências para exibir na tela
+                    df_erros = df_res[df_res['DIFERENCA'] != 0].copy()
+                    
+                    st.write(f"### 📋 Divergências Detalhadas ({len(df_erros)})")
+                    st.dataframe(df_erros, use_container_width=True)
+                    
+                    # Gerar Excel para download
+                    buffer = io.BytesIO()
+                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                        df_res.to_excel(writer, index=False, sheet_name='Geral')
+                    
+                    st.download_button(
+                        label="📥 Baixar Relatório Completo (Excel)",
+                        data=buffer.getvalue(),
+                        file_name="conciliacao_dacolonia.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                else:
+                    st.error("❌ Não foram encontrados dados para processar. Verifique credenciais e armazéns.")
+        else:
+            st.error("❌ Falha na autenticação WMS (Client ID/Secret inválidos).")
