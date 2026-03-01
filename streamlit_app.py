@@ -69,7 +69,7 @@ def buscar_dados_wms(token):
         # Payload simplificado: sem filtros de ID de Tipo de Estoque (PA/MP)
         payload = {
             "agrupadores": ["UNIDADE"],
-            "unidadeIdPreferencial": "404fc993-c7f1-4b24-926b-96b99c71ebdd",
+            "unidadeIdPreferencial": "019c94d5-c1b3-7b4a-8070-eac5381edda3",
             "condicionais": [{"chave": "UNIDADE", "valor": "019c94d5-c1b3-7b4a-8070-eac5381edda3"}],
             "filtros": {
                 "unidades": ["404fc993-c7f1-4b24-926b-96b99c71ebdd"],
