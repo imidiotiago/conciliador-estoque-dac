@@ -4,9 +4,6 @@ import streamlit as st
 import io
 from requests.auth import HTTPBasicAuth
 
-# --- CONFIGURAÇÃO INTERNA (OCULTA DA TELA) ---
-URL_REST_PROTHEUS = "https://dacolonia196730.protheus.cloudtotvs.com.br:10408/rest"
-
 # --- 1. FUNÇÃO DE AUTENTICAÇÃO (WMS) ---
 def gera_token(client_id, client_secret):
     AUTH_URL = "https://supply.rac.totvs.app/totvs.rac/connect/token" 
@@ -40,6 +37,8 @@ def buscar_dados_protheus(url_base, user, pwd):
             if response.status_code == 200:
                 dados = response.json()
                 items = dados.get('items', [])
+                if not items: break # Evita loop infinito se items vier vazio
+                
                 for i in items:
                     val_arm = str(i.get('armazem', i.get('armazém', ''))).strip()
                     if val_arm in ['01', '05', '1', '5']:
@@ -58,23 +57,21 @@ def buscar_dados_protheus(url_base, user, pwd):
     return pd.DataFrame(todos_items)
 
 # --- 3. BUSCA DADOS WMS ---
-def buscar_dados_wms(token):
+def buscar_dados_wms(token, id_pa, id_mp, id_unidade):
     todos_items_formatados = []
     pagina_wms = 1
     tem_proxima_wms = True
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    ID_PA = "019b93db-5f78-7d1d-84bb-77fc2c45b068"
-    ID_MP = "019b5bb5-cf01-781f-92be-49c08ab2d635"
 
     while tem_proxima_wms:
         url_pag = f"https://supply.logistica.totvs.app/wms/query/api/v3/estoques/analitico?page={pagina_wms}&pageSize=1000"
         payload = {
             "agrupadores": ["UNIDADE"],
-            "unidadeIdPreferencial": "404fc993-c7f1-4b24-926b-96b99c71ebdd",
-            "condicionais": [{"chave": "UNIDADE", "valor": "404fc993-c7f1-4b24-926b-96b99c71ebdd"}],
+            "unidadeIdPreferencial": id_unidade,
+            "condicionais": [{"chave": "UNIDADE", "valor": id_unidade}],
             "filtros": {
-                "unidades": ["404fc993-c7f1-4b24-926b-96b99c71ebdd"],
-                "tiposEstoque": [ID_PA, ID_MP],
+                "unidades": [id_unidade],
+                "tiposEstoque": [id_pa, id_mp],
                 "saldoDisponivel": False
             }
         }
@@ -82,15 +79,20 @@ def buscar_dados_wms(token):
             response = requests.post(url_pag, json=payload, headers=headers, timeout=30)
             if response.status_code == 200:
                 dados = response.json()
-                for item in dados.get('items', []):
+                items = dados.get('items', [])
+                if not items: break
+
+                for item in items:
                     id_tipo = item.get('tipoEstoque', {}).get('id', '')
-                    cod_arm = "01" if id_tipo == ID_PA else "05" if id_tipo == ID_MP else ""
+                    cod_arm = "01" if id_tipo == id_pa else "05" if id_tipo == id_mp else ""
+                    
                     if cod_arm:
                         lote, validade = "0", "1900-01-01"
                         for c in item.get('caracteristicas', []):
                             desc = c.get('descricao', '').upper()
                             if "LOTE" in desc: lote = str(c.get('valor', '0')).strip()
                             elif "VALIDADE" in desc: validade = str(c.get('valor', '1900-01-01')).strip()
+                        
                         todos_items_formatados.append({
                             "produto": str(item.get('produto', {}).get('codigo', '')).strip(),
                             "lote_wms": lote, 
@@ -108,84 +110,83 @@ def buscar_dados_wms(token):
 st.set_page_config(page_title="Conciliador DaColonia", layout="wide")
 st.title("📊 Conciliador de Estoque: Protheus x WMS")
 
+# Sidebar para inputs
 with st.sidebar:
     st.header("🔑 Acesso Protheus")
-    user_p = st.text_input("Usuário Protheus", key="saved_user")
-    pass_p = st.text_input("Senha Protheus", type="password", key="saved_pass")
+    url_prw = st.text_input("URL REST Protheus", value="https://dacolonia196730.protheus.cloudtotvs.com.br:10408/rest")
+    user_p = st.text_input("Usuário Protheus")
+    pass_p = st.text_input("Senha Protheus", type="password")
+    
     st.divider()
     st.header("☁️ Acesso WMS SaaS")
-    wms_id = st.text_input("Client ID", type="password", key="saved_wms_id")
-    wms_secret = st.text_input("Client Secret", type="password", key="saved_wms_secret")
+    wms_id = st.text_input("Client ID", type="password")
+    wms_secret = st.text_input("Client Secret", type="password")
+    
+    with st.expander("Configurações Avançadas de IDs"):
+        id_pa = st.text_input("ID Tipo PA", value="019b93db-5f78-7d1d-84bb-77fc2c45b068")
+        id_mp = st.text_input("ID Tipo MP", value="019b5bb5-cf01-781f-92be-49c08ab2d635")
+        id_unidade = st.text_input("ID Unidade", value="404fc993-c7f1-4b24-926b-96b99c71ebdd")
+
     st.divider()
-    st.caption("🔒 Os dados são mantidos apenas durante a sessão.")
+    st.caption("🔒 Dados mantidos apenas em memória durante a execução.")
 
+# Botão de Ação
 if st.button("🚀 Iniciar Conciliação"):
-    # Validação dos campos obrigatórios
-    if not all([user_p, pass_p, wms_id, wms_secret]):
-        st.warning("⚠️ Preencha todos os campos na barra lateral.")
+    if not all([user_p, pass_p, wms_id, wms_secret, url_prw]):
+        st.warning("⚠️ Preencha todos os campos de login na barra lateral.")
     else:
-        token = gera_token(wms_id, wms_secret)
-        if token:
-            with st.spinner("Comparando saldos..."):
-                # Busca os dados usando a URL interna
-                df_p_raw = buscar_dados_protheus(URL_REST_PROTHEUS, user_p, pass_p)
-                df_w_raw = buscar_dados_wms(token)
+        # 1. Autenticação WMS
+        with st.status("Autenticando e buscando dados...", expanded=True) as status:
+            st.write("Obtendo Token WMS...")
+            token = gera_token(wms_id, wms_secret)
+            
+            if not token:
+                st.error("❌ Falha na autenticação WMS. Verifique Client ID e Secret.")
+                st.stop()
+            
+            # 2. Busca de Dados
+            st.write("Buscando dados no Protheus...")
+            df_p_raw = buscar_dados_protheus(url_prw, user_p, pass_p)
+            
+            st.write("Buscando dados no WMS...")
+            df_w_raw = buscar_dados_wms(token, id_pa, id_mp, id_unidade)
+            
+            status.update(label="Processamento Concluído!", state="complete", expanded=False)
 
-                if not df_p_raw.empty and not df_w_raw.empty:
-                    # Agrupamento Protheus
-                    df_p = df_p_raw.groupby(['produto', 'armazem', 'lote_protheus', 'validade_protheus'], as_index=False)['quantidade'].sum()
-                    df_p.rename(columns={'quantidade': 'SALDO_PROTHEUS'}, inplace=True)
+        # 3. Lógica de Comparação
+        if not df_p_raw.empty and not df_w_raw.empty:
+            # Agrupamento e Merge (Mantendo sua lógica original)
+            df_p = df_p_raw.groupby(['produto', 'armazem', 'lote_protheus', 'validade_protheus'], as_index=False)['quantidade'].sum()
+            df_p.rename(columns={'quantidade': 'SALDO_PROTHEUS'}, inplace=True)
 
-                    # Agrupamento WMS
-                    df_w = df_w_raw.groupby(['produto', 'armazem', 'lote_wms', 'validade_wms'], as_index=False)['quantidade'].sum()
-                    df_w.rename(columns={'quantidade': 'SALDO_WMS'}, inplace=True)
-                    
-                    # Merge dos dados (Conciliação)
-                    df_res = pd.merge(
-                        df_p, 
-                        df_w, 
-                        left_on=['produto', 'armazem', 'lote_protheus', 'validade_protheus'],
-                        right_on=['produto', 'armazem', 'lote_wms', 'validade_wms'],
-                        how='outer'
-                    )
+            df_w = df_w_raw.groupby(['produto', 'armazem', 'lote_wms', 'validade_wms'], as_index=False)['quantidade'].sum()
+            df_w.rename(columns={'quantidade': 'SALDO_WMS'}, inplace=True)
 
-                    # Preenchimento de valores nulos (Itens que existem em um lado mas não no outro)
-                    df_res = df_res.fillna({
-                        'SALDO_PROTHEUS': 0, 
-                        'SALDO_WMS': 0, 
-                        'lote_protheus': '-', 
-                        'lote_wms': '-', 
-                        'validade_protheus': '-', 
-                        'validade_wms': '-'
-                    })
-                    
-                    # Cálculo da diferença
-                    df_res['DIFERENCA'] = df_res['SALDO_PROTHEUS'] - df_res['SALDO_WMS']
-                    
-                    # Ordenação de colunas
-                    cols = ['produto', 'armazem', 'lote_protheus', 'lote_wms', 'validade_protheus', 'validade_wms', 'SALDO_PROTHEUS', 'SALDO_WMS', 'DIFERENCA']
-                    df_res = df_res[cols]
-                    
-                    st.success("Conciliação concluída!")
-                    
-                    # Filtrar apenas as divergências para exibir na tela
-                    df_erros = df_res[df_res['DIFERENCA'] != 0].copy()
-                    
-                    st.write(f"### 📋 Divergências Detalhadas ({len(df_erros)})")
-                    st.dataframe(df_erros, use_container_width=True)
-                    
-                    # Gerar Excel para download
-                    buffer = io.BytesIO()
-                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                        df_res.to_excel(writer, index=False, sheet_name='Geral')
-                    
-                    st.download_button(
-                        label="📥 Baixar Relatório Completo (Excel)",
-                        data=buffer.getvalue(),
-                        file_name="conciliacao_dacolonia.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-                else:
-                    st.error("❌ Não foram encontrados dados para processar. Verifique credenciais e armazéns.")
+            df_res = pd.merge(
+                df_p, df_w, 
+                left_on=['produto', 'armazem', 'lote_protheus', 'validade_protheus'],
+                right_on=['produto', 'armazem', 'lote_wms', 'validade_wms'],
+                how='outer'
+            )
+
+            df_res = df_res.fillna({'SALDO_PROTHEUS': 0, 'SALDO_WMS': 0})
+            df_res['DIFERENCA'] = df_res['SALDO_PROTHEUS'] - df_res['SALDO_WMS']
+            
+            # Exibição
+            df_erros = df_res[df_res['DIFERENCA'] != 0].copy()
+            st.subheader(f"Divergências Encontradas: {len(df_erros)}")
+            st.dataframe(df_erros, use_container_width=True)
+
+            # Download Excel
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                df_res.to_excel(writer, index=False, sheet_name='Conciliacao')
+            
+            st.download_button(
+                label="📥 Baixar Relatório Completo",
+                data=buffer.getvalue(),
+                file_name="conciliacao.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
         else:
-            st.error("❌ Falha na autenticação WMS (Client ID/Secret inválidos).")
+            st.error("Não foi possível obter dados de uma das fontes. Verifique se há saldo nos armazéns 01/05.")
