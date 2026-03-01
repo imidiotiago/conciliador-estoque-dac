@@ -4,7 +4,8 @@ import streamlit as st
 import io
 from requests.auth import HTTPBasicAuth
 
-# --- CONFIGURAÇÃO INTERNA (OCULTA DA TELA) ---
+# --- CONFIGURAÇÃO INTERNA ---
+# O endereço foi movido para cá para não aparecer na tela
 URL_REST_PROTHEUS = "https://dacolonia196730.protheus.cloudtotvs.com.br:10408/rest"
 
 # --- 1. FUNÇÃO DE AUTENTICAÇÃO (WMS) ---
@@ -63,15 +64,15 @@ def buscar_dados_wms(token):
     pagina_wms = 1
     tem_proxima_wms = True
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    ID_PA = "019b93db-5f78-7d1d-84bb-77fc2c45b068"
-    ID_MP = "019b5bb5-cf01-781f-92be-49c08ab2d635"
+    ID_PA = "04a6fd47-f32e-4cad-a803-620d03adf8f2"
+    ID_MP = "019c94d5-c1b3-7b4a-8070-eac5381edda3"
 
     while tem_proxima_wms:
         url_pag = f"https://supply.logistica.totvs.app/wms/query/api/v3/estoques/analitico?page={pagina_wms}&pageSize=1000"
         payload = {
             "agrupadores": ["UNIDADE"],
-            "unidadeIdPreferencial": "404fc993-c7f1-4b24-926b-96b99c71ebdd",
-            "condicionais": [{"chave": "UNIDADE", "valor": "404fc993-c7f1-4b24-926b-96b99c71ebdd"}],
+            "unidadeIdPreferencial": "ac275b55-90f8-44b8-b8cb-bdcfca969526",
+            "condicionais": [{"chave": "UNIDADE", "valor": "ac275b55-90f8-44b8-b8cb-bdcfca969526"}],
             "filtros": {
                 "unidades": ["404fc993-c7f1-4b24-926b-96b99c71ebdd"],
                 "tiposEstoque": [ID_PA, ID_MP],
@@ -110,6 +111,7 @@ st.title("📊 Conciliador de Estoque: Protheus x WMS")
 
 with st.sidebar:
     st.header("🔑 Acesso Protheus")
+    # Removido o st.text_input do endereço do servidor
     user_p = st.text_input("Usuário Protheus", key="saved_user")
     pass_p = st.text_input("Senha Protheus", type="password", key="saved_pass")
     st.divider()
@@ -120,72 +122,48 @@ with st.sidebar:
     st.caption("🔒 Os dados são mantidos apenas durante a sessão.")
 
 if st.button("🚀 Iniciar Conciliação"):
-    # Validação dos campos obrigatórios
+    # Verifica se os outros campos estão preenchidos (URL_REST_PROTHEUS é fixa agora)
     if not all([user_p, pass_p, wms_id, wms_secret]):
         st.warning("⚠️ Preencha todos os campos na barra lateral.")
     else:
         token = gera_token(wms_id, wms_secret)
         if token:
             with st.spinner("Comparando saldos..."):
-                # Busca os dados usando a URL interna
+                # Utiliza a variável oculta URL_REST_PROTHEUS
                 df_p_raw = buscar_dados_protheus(URL_REST_PROTHEUS, user_p, pass_p)
                 df_w_raw = buscar_dados_wms(token)
 
                 if not df_p_raw.empty and not df_w_raw.empty:
-                    # Agrupamento Protheus
                     df_p = df_p_raw.groupby(['produto', 'armazem', 'lote_protheus', 'validade_protheus'], as_index=False)['quantidade'].sum()
                     df_p.rename(columns={'quantidade': 'SALDO_PROTHEUS'}, inplace=True)
 
-                    # Agrupamento WMS
                     df_w = df_w_raw.groupby(['produto', 'armazem', 'lote_wms', 'validade_wms'], as_index=False)['quantidade'].sum()
                     df_w.rename(columns={'quantidade': 'SALDO_WMS'}, inplace=True)
                     
-                    # Merge dos dados (Conciliação)
                     df_res = pd.merge(
                         df_p, 
                         df_w, 
                         left_on=['produto', 'armazem', 'lote_protheus', 'validade_protheus'],
                         right_on=['produto', 'armazem', 'lote_wms', 'validade_wms'],
                         how='outer'
-                    )
-
-                    # Preenchimento de valores nulos (Itens que existem em um lado mas não no outro)
-                    df_res = df_res.fillna({
-                        'SALDO_PROTHEUS': 0, 
-                        'SALDO_WMS': 0, 
-                        'lote_protheus': '-', 
-                        'lote_wms': '-', 
-                        'validade_protheus': '-', 
-                        'validade_wms': '-'
-                    })
+                    ).fillna({'SALDO_PROTHEUS': 0, 'SALDO_WMS': 0, 'lote_protheus': '-', 'lote_wms': '-', 'validade_protheus': '-', 'validade_wms': '-'})
                     
-                    # Cálculo da diferença
                     df_res['DIFERENCA'] = df_res['SALDO_PROTHEUS'] - df_res['SALDO_WMS']
                     
-                    # Ordenação de colunas
                     cols = ['produto', 'armazem', 'lote_protheus', 'lote_wms', 'validade_protheus', 'validade_wms', 'SALDO_PROTHEUS', 'SALDO_WMS', 'DIFERENCA']
                     df_res = df_res[cols]
                     
                     st.success("Conciliação concluída!")
-                    
-                    # Filtrar apenas as divergências para exibir na tela
                     df_erros = df_res[df_res['DIFERENCA'] != 0].copy()
                     
                     st.write(f"### 📋 Divergências Detalhadas ({len(df_erros)})")
                     st.dataframe(df_erros, use_container_width=True)
                     
-                    # Gerar Excel para download
                     buffer = io.BytesIO()
                     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
                         df_res.to_excel(writer, index=False, sheet_name='Geral')
-                    
-                    st.download_button(
-                        label="📥 Baixar Relatório Completo (Excel)",
-                        data=buffer.getvalue(),
-                        file_name="conciliacao_dacolonia.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
+                    st.download_button("📥 Baixar Relatório", buffer.getvalue(), "conciliacao_dacolonia.xlsx")
                 else:
-                    st.error("❌ Não foram encontrados dados para processar. Verifique credenciais e armazéns.")
+                    st.error("❌ Verifique as credenciais ou filtros de armazém.")
         else:
-            st.error("❌ Falha na autenticação WMS (Client ID/Secret inválidos).")
+            st.error("❌ Falha na autenticação WMS.")
